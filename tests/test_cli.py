@@ -76,6 +76,50 @@ class TestScanCommand(unittest.TestCase):
         rc = cli.main(["scan", "--config", str(self.config_path), "--dry-run"])
         self.assertEqual(rc, 0)
 
+    def test_dry_run_respects_disabled_sources(self):
+        import io
+        from contextlib import redirect_stdout
+
+        config = json.loads(cli.EXAMPLE_CONFIG)
+        config["sources"]["github_code"] = False
+        config["sources"]["github_repos"] = False
+        config["sources"]["web_pages"] = ["https://board.example.net/t/13"]
+        disabled_path = Path(self.tmp.name) / "disabled.json"
+        disabled_path.write_text(json.dumps(config), encoding="utf-8")
+        out = io.StringIO()
+        with redirect_stdout(out):
+            rc = cli.main(["scan", "--config", str(disabled_path), "--dry-run"])
+        self.assertEqual(rc, 0)
+        printed = out.getvalue()
+        self.assertNotIn("code  search", printed)
+        self.assertNotIn("repo  search", printed)
+        self.assertIn("page  fetch", printed)
+        self.assertIn("1 operations total", printed)
+
+    def test_dry_run_counts_pages_once_per_scan(self):
+        import io
+        from contextlib import redirect_stdout
+
+        config = json.loads(cli.EXAMPLE_CONFIG)
+        config["sources"]["github_code"] = False
+        config["sources"]["github_repos"] = False
+        config["sources"]["web_pages"] = ["https://board.example.net/t/13"]
+        second = dict(config["products"][0], name="OtherTool", signatures=[
+            {"value": "OtherTool", "type": "name", "strength": "low"},
+        ])
+        config["products"].append(second)
+        path = Path(self.tmp.name) / "twoproducts.json"
+        path.write_text(json.dumps(config), encoding="utf-8")
+        out = io.StringIO()
+        with redirect_stdout(out):
+            cli.main(["scan", "--config", str(path), "--dry-run"])
+        self.assertIn("1 operations total", out.getvalue())
+
+    def test_github_token_flag_is_gone(self):
+        # MOK-46 F7: a token on argv is readable by any local user via ps.
+        with self.assertRaises(SystemExit):
+            cli.build_parser().parse_args(["scan", "--github-token", "ghp_x"])
+
     def test_first_scan_creates_finding_kit_and_dashboard(self):
         rc = self._scan([make_finding()])
         self.assertEqual(rc, 0)
@@ -118,6 +162,46 @@ class TestScanCommand(unittest.TestCase):
             rc = cli.main(["scan", "--config", str(self.config_path), "--out", str(self.out)])
         self.assertEqual(rc, 0)
         self.assertTrue((self.out / "findings.jsonl").exists())
+
+
+class TestWatchLoop(unittest.TestCase):
+    def test_watch_survives_a_crashed_scan(self):
+        # MOK-46 F7: a scan crash (bad config, failed kit) must not kill the
+        # daemon — the loop reports and continues until Ctrl-C.
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "watch.json"
+            config_path.write_text(cli.EXAMPLE_CONFIG, encoding="utf-8")
+            with patch.object(
+                cli, "cmd_scan", side_effect=[RuntimeError("boom"), KeyboardInterrupt()]
+            ) as mock_scan:
+                rc = cli.main(["watch", "--config", str(config_path), "--interval", "0"])
+                self.assertEqual(rc, 0)
+                self.assertEqual(mock_scan.call_count, 2)
+
+
+class TestWebhookAlerts(unittest.TestCase):
+    def test_non_2xx_webhook_is_reported_not_failed_delivery(self):
+        import threading
+        from http.server import BaseHTTPRequestHandler, HTTPServer
+
+        class NotFound(BaseHTTPRequestHandler):
+            def do_POST(self):
+                length = int(self.headers.get("Content-Length", 0))
+                self.rfile.read(length)
+                self.send_response(404)
+                self.end_headers()
+                self.wfile.write(b"not found")
+
+            def log_message(self, *a):
+                pass
+
+        server = HTTPServer(("127.0.0.1", 0), NotFound)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.shutdown)
+        port = server.server_address[1]
+        delivered, message = send_webhook(f"http://127.0.0.1:{port}/hook", [make_finding()], timeout_s=5)
+        self.assertFalse(delivered)
+        self.assertIn("HTTP 404", message)
 
 
 class TestStatusAndKitCommands(unittest.TestCase):

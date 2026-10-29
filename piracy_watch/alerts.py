@@ -8,6 +8,7 @@ failures are reported, never raised — a dead webhook must not kill a scan.
 from __future__ import annotations
 
 import json
+import urllib.error
 import urllib.request
 
 from . import __version__
@@ -43,9 +44,9 @@ def send_webhook(url: str, findings: list[Finding], timeout_s: int = 10) -> tupl
     )
     try:
         with urllib.request.urlopen(request, timeout=timeout_s) as response:
-            status = response.status
+            return True, f"webhook delivered (HTTP {response.status})"
+    except urllib.error.HTTPError as exc:
+        # Non-2xx statuses surface as HTTPError from urlopen.
+        return False, f"webhook returned HTTP {exc.code}"
     except Exception as exc:  # noqa: BLE001 — any delivery failure is non-fatal
         return False, f"webhook delivery failed: {exc.__class__.__name__}: {exc}"
-    if 200 <= status < 300:
-        return True, f"webhook delivered (HTTP {status})"
-    return False, f"webhook returned HTTP {status}"

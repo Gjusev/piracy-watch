@@ -1,15 +1,18 @@
 """Findings store: a single JSONL file that dedupes by finding id.
 
-The store is the memory between runs: re-found findings get their
-``last_seen`` bumped, brand-new URLs become ``new`` findings (which is
-what triggers alerts and DMCA kit generation). Scale for this MVP is
-hundreds of findings, so the file is rewritten atomically on save.
+A finding's identity is the hash of ``(product, source, url)`` — the same
+URL seen by two sources is deliberately two findings (different evidence,
+different kits). The store is the memory between runs: re-found findings
+get their ``last_seen`` bumped, brand-new URLs become ``new`` findings
+(which is what triggers alerts and DMCA kit generation). Scale for this
+MVP is hundreds of findings, so the file is rewritten atomically on save.
 """
 
 from __future__ import annotations
 
 import json
 import os
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -43,6 +46,9 @@ class Store:
             try:
                 finding = Finding.from_dict(raw)
             except (TypeError, ValueError):
+                # A hand-edited line that fails validation would otherwise
+                # silently delete the finding on the next save — say so.
+                print(f"warning: {self.path}: skipping invalid finding line: {line[:80]}", file=sys.stderr)
                 continue
             self._findings[finding.finding_id] = finding
 

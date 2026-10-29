@@ -1,10 +1,13 @@
 """HTTP fetcher with defensive limits and the GitHub API client.
 
 Everything fetched from the outside world is untrusted data. The fetcher
-enforces: https-only (except explicitly allowed localhost test URLs in
-tests), a hard request timeout, a response size cap, and no following of
-redirects into non-http schemes. Bodies are decoded lossily — a broken or
-hostile payload must never crash the scan.
+enforces: http(s) schemes only, a per-socket timeout plus a total fetch
+deadline, and a response size cap. Redirects are only followed to the
+same host over http(s) — never to other hosts, never downgraded to plain
+http, never to other schemes — so an Authorization header can never leak
+to a redirect target. Bodies are decoded lossily — a broken or hostile
+payload must never crash the scan. The GitHub API client additionally
+refuses any non-https URL.
 """
 
 from __future__ import annotations
@@ -28,26 +31,69 @@ class RateLimited(FetchError):
     """GitHub rate limit exhausted; the scan should stop this source."""
 
 
-class Fetcher:
-    """Minimal HTTP GET client with timeout and size caps."""
+class _SafeRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Redirect policy: same-host http(s) only.
 
-    def __init__(self, timeout_s: int = 15, max_bytes: int = 2_000_000):
+    urllib's default redirect handler copies *all* headers — including
+    ``Authorization`` — onto the redirected request and follows https→http
+    downgrades silently. This handler refuses every redirect that changes
+    host, downgrades the scheme, or leaves http(s), so a token really only
+    ever reaches the host it was set for. Refused redirects surface as an
+    HTTPError, which :meth:`Fetcher.get` returns as a normal (status, body)
+    result so callers can report the hop and move on.
+    """
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        origin = urllib.parse.urlsplit(req.full_url)
+        parts = urllib.parse.urlsplit(newurl)
+        scheme = (parts.scheme or origin.scheme).casefold()  # relative Location keeps the origin scheme
+        if scheme not in ("http", "https"):
+            raise urllib.error.HTTPError(
+                newurl, code, f"{msg} - refusing redirect to non-http(s) URL {newurl!r}", headers, fp
+            )
+        if origin.scheme.casefold() == "https" and scheme == "http":
+            raise urllib.error.HTTPError(
+                newurl, code, f"{msg} - refusing https→http redirect to {newurl!r}", headers, fp
+            )
+        if (parts.netloc or origin.netloc).casefold() != origin.netloc.casefold():
+            raise urllib.error.HTTPError(
+                newurl, code, f"{msg} - refusing cross-host redirect to {newurl!r}", headers, fp
+            )
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+class Fetcher:
+    """Minimal HTTP GET client with timeouts and size caps.
+
+    ``timeout_s`` bounds each socket operation; ``total_timeout_s`` bounds
+    the whole response (headers + body), defaulting to twice ``timeout_s``,
+    so a slow-drip server cannot stall a scan indefinitely.
+    """
+
+    def __init__(
+        self,
+        timeout_s: int = 15,
+        max_bytes: int = 2_000_000,
+        total_timeout_s: int | None = None,
+    ):
         self.timeout_s = timeout_s
         self.max_bytes = max_bytes
+        self.total_timeout_s = total_timeout_s if total_timeout_s is not None else max(timeout_s, 1) * 2
+        self._opener = urllib.request.build_opener(_SafeRedirectHandler())
 
     def get(self, url: str, headers: dict[str, str] | None = None) -> tuple[int, bytes]:
         """GET *url*, returning (status, body) capped at ``max_bytes``.
 
-        HTTP error statuses (4xx/5xx) are returned as-is so callers can
-        decide policy (rate limits, skips). Transport failures raise
-        :class:`FetchError`.
+        HTTP error statuses (4xx/5xx) and refused redirects (3xx) are
+        returned as-is so callers can decide policy (rate limits, skips).
+        Transport failures raise :class:`FetchError`.
         """
         scheme = urllib.parse.urlsplit(url).scheme.casefold()
         if scheme not in ("http", "https"):
             raise FetchError(f"refusing to fetch non-http URL: {url!r}")
         request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT, **(headers or {})})
         try:
-            with urllib.request.urlopen(request, timeout=self.timeout_s) as response:
+            with self._opener.open(request, timeout=self.timeout_s) as response:
                 return response.status, self._read_capped(response)
         except urllib.error.HTTPError as exc:
             return exc.code, self._read_capped(exc)
@@ -68,10 +114,17 @@ class Fetcher:
         return status, body.decode("utf-8", errors="replace")
 
     def _read_capped(self, stream) -> bytes:
+        deadline = time.monotonic() + self.total_timeout_s
         chunks: list[bytes] = []
         total = 0
+        # read1 returns whatever the peer has already sent instead of
+        # blocking until a full 64 KiB buffer arrives, so the deadline
+        # below is actually checked between chunks of a slow-drip body.
+        reader = getattr(stream, "read1", None) or stream.read
         while True:
-            chunk = stream.read(65536)
+            if time.monotonic() >= deadline:
+                break  # total deadline: a slow-drip body must not stall the scan
+            chunk = reader(65536)
             if not chunk:
                 break
             total += len(chunk)
@@ -85,8 +138,10 @@ class GithubClient:
     """GitHub REST client for the two search endpoints Piracy-Watch uses.
 
     The token never leaves this process except in the Authorization header
-    to api.github.com. Search API budget is 30 requests/minute authenticated
-    (10 unauthenticated), so every source caps its query count.
+    to api.github.com — enforced here (https-only API URLs) and by the
+    fetcher's redirect policy (no cross-host or downgraded redirects).
+    Search API budget is 30 requests/minute authenticated (10
+    unauthenticated), so every source caps its query count.
     """
 
     API = "https://api.github.com"
@@ -116,10 +171,13 @@ class GithubClient:
     def _search(self, path: str, params: dict[str, str]) -> dict:
         if self.queries_used >= 30:
             raise RateLimited("local query budget exhausted (30 searches per run)")
+        url = f"{self.API}{path}"
+        if urllib.parse.urlsplit(url).scheme.casefold() != "https":
+            raise FetchError(f"refusing to send the token over a non-https API URL: {url!r}")
         query = urllib.parse.urlencode(params)
         self.queries_used += 1
         for attempt in (1, 2):  # one retry on transient GitHub 5xx
-            status, payload = self.fetcher.get_json(f"{self.API}{path}?{query}", self._headers())
+            status, payload = self.fetcher.get_json(f"{url}?{query}", self._headers())
             if status == 200:
                 if not isinstance(payload, dict):
                     raise FetchError(f"unexpected search payload type from {path}")

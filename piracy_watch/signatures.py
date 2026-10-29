@@ -89,7 +89,11 @@ def match_confidence(sig: Signature, in_name: bool = True) -> str:
 
 
 def finding_id(product: str, source: str, url: str) -> str:
-    """Stable identity of a finding: the same URL is the same finding."""
+    """Stable identity of a finding: hash of (product, source, url).
+
+    The same URL under two sources is two findings on purpose — each
+    carries its own evidence and kit.
+    """
     import hashlib
 
     key = f"{product}|{source}|{url}".encode("utf-8", errors="replace")

@@ -93,6 +93,22 @@ class TestStore(unittest.TestCase):
         store = Store(self.path)
         self.assertEqual(store.all(), [])  # nothing loadable, but no crash
 
+    def test_invalid_line_warns_to_stderr(self):
+        # MOK-46 F7: a hand-edited line that fails validation would silently
+        # delete the finding on the next save — it must at least warn.
+        import contextlib
+        import io
+
+        good = json.dumps(make_finding().to_dict())
+        bad = json.dumps({**make_finding(url="https://github.com/x/y").to_dict(), "status": "bogus"})
+        self.path.write_text(f"{good}\n{bad}\n", encoding="utf-8")
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            store = Store(self.path)
+        self.assertIn("warning", err.getvalue())
+        self.assertIn("skipping invalid finding line", err.getvalue())
+        self.assertEqual(len(store.all()), 1)  # the valid finding survives
+
 
 if __name__ == "__main__":
     unittest.main()

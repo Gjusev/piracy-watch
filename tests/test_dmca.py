@@ -12,15 +12,25 @@ from piracy_watch.sources.base import Finding
 
 CONFIG = parse_config(json.loads(EXAMPLE_CONFIG))
 
-# Elements GitHub's DMCA takedown policy requires in every notice.
+# Elements GitHub's DMCA takedown policy and its "Guide to Submitting a
+# DMCA Takedown Notice" require or recommend in every notice.
 REQUIRED_ELEMENTS = (
     "good faith belief",
+    "i have taken fair use into consideration",
     "penalty of perjury",
+    "i swear, under penalty of perjury",
     "authorized to act",
     "dmca@github.com",
-    "Contact information",
+    "contact information",
     "copyrighted work",
-    "Signature",
+    "signature",
+    "i have read and understand github's guide to filing a dmca notice",
+)
+
+# What the affected user must do (guide element #4, the remedy instruction).
+REMEDY_ELEMENTS = (
+    "remove or disable access",
+    "the affected user should remove",
 )
 
 
@@ -42,11 +52,16 @@ def make_finding(url="https://github.com/cracker/widgetpro-crack") -> Finding:
 class TestGitHubNotice(unittest.TestCase):
     def setUp(self):
         self.notice = render_github_notice(CONFIG, make_finding())
+        # Whitespace-normalized so line breaks in the template don't hide matches.
+        self.lowered = " ".join(self.notice.casefold().split())
 
     def test_all_required_elements_present(self):
-        lowered = self.notice.casefold()
         for element in REQUIRED_ELEMENTS:
-            self.assertIn(element.casefold(), lowered, f"missing required element: {element}")
+            self.assertIn(element, self.lowered, f"missing required element: {element}")
+
+    def test_remedy_instruction_present(self):
+        for element in REMEDY_ELEMENTS:
+            self.assertIn(element, self.lowered, f"missing remedy element: {element}")
 
     def test_finding_details_included(self):
         self.assertIn("https://github.com/cracker/widgetpro-crack", self.notice)
@@ -68,6 +83,13 @@ class TestHostEmail(unittest.TestCase):
         self.assertIn("https://github.com/cracker/widgetpro-crack", email)
         self.assertIn("abuse@[host-of-url]", email)
         self.assertIn("[FILL IN", email)
+
+    def test_no_wrong_statute_citation(self):
+        # MOK-46 F5: BDSG is data-protection law, irrelevant to copyright
+        # takedowns; DSM Art. 17 targets OCSSP platforms, not generic hosts.
+        email = render_host_email(CONFIG, make_finding())
+        self.assertNotIn("BDSG", email)
+        self.assertNotIn("DSM", email)
 
 
 class TestKitGeneration(unittest.TestCase):

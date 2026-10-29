@@ -134,7 +134,26 @@ class TestGithubRepoSource(unittest.TestCase):
         self.assertEqual(warnings, [])
         self.assertEqual(len(findings), 1)
         self.assertEqual(findings[0].confidence, "high")  # product name in repo name
-        self.assertIn("WidgetPro crack", findings[0].signatures)
+        # Only verifiable matches are recorded: the product name *and* the
+        # crack term both literally appear in the repo name/description.
+        self.assertEqual(findings[0].signatures, ["WidgetPro", "crack"])
+
+    def test_fuzzy_hit_does_not_claim_an_unmatched_signature(self):
+        # MOK-46 F6: GitHub repo search is fuzzy — this repo matched the
+        # query but contains no "crack" anywhere. The finding must not
+        # record "WidgetPro crack" as a matched signature.
+        items = [
+            {
+                "full_name": "cracker/widgetpro-tools",
+                "html_url": "https://github.com/cracker/widgetpro-tools",
+                "description": "Helper utilities for WidgetPro fans",
+            }
+        ]
+        source = GithubRepoSource(StubClient([items]), crack_terms=("crack",))
+        findings, _ = source.scan([make_product()])
+        self.assertEqual(len(findings), 1)
+        self.assertEqual(findings[0].signatures, ["WidgetPro"])
+        self.assertNotIn("crack", " ".join(findings[0].signatures))
 
     def test_description_only_match_is_medium(self):
         items = [
@@ -148,6 +167,7 @@ class TestGithubRepoSource(unittest.TestCase):
         findings, _ = source.scan([make_product()])
         self.assertEqual(len(findings), 1)
         self.assertEqual(findings[0].confidence, "medium")
+        self.assertEqual(findings[0].signatures, ["WidgetPro", "crack"])
 
     def test_no_product_mention_dropped(self):
         items = [

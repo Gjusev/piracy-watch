@@ -7,10 +7,13 @@ no "send" button: DMCA notices are signed under penalty of perjury, so a
 human must verify the infringement and send the notice themselves.
 
 The GitHub notice template includes every element required by GitHub's
-DMCA takedown policy (docs.github.com/en/site-policy/content-removal-policies/dmca-takedown-policy):
-signature, work identification, infringing material + URLs, contact info,
-good-faith statement, accuracy-under-perjury statement, and authorization
-statement. Elements the tool cannot know are marked ``[FILL IN]``.
+DMCA takedown policy and its "Guide to Submitting a DMCA Takedown
+Notice" (docs.github.com/en/site-policy/content-removal-policies/dmca-takedown-policy):
+work identification, infringing material + URLs, contact info, good-faith
+statement (with the fair-use sentence), the remedy the affected user must
+perform, the accuracy-under-perjury statement, and the authorization +
+signature — plus the guide's recommended acknowledgment sentence.
+Elements the tool cannot know are marked ``[FILL IN]``.
 """
 
 from __future__ import annotations
@@ -74,18 +77,26 @@ Specific infringing URL(s):
 - **Address:** {v.address or "[FILL IN: postal address]"}
 - **Phone:** {v.phone or "[FILL IN: phone number]"}
 
-## 4. Good faith statement
+## 4. Good faith statement, fair use, and remedy
 
 I have a good faith belief that the use of the material described above is
-not authorized by the copyright owner, its agent, or the law.
+not authorized by the copyright owner, its agent, or the law. I have taken
+fair use into consideration.
+
+Remedy requested: please remove or disable access to the infringing
+material identified above. The affected user should remove the infringing
+files and any cracked or keygen content from the repository.
 
 ## 5. Statement of accuracy
 
-I state that the information in this notification is accurate and, under
-penalty of perjury, that I am the copyright owner, or am authorized to act
-on behalf of the owner, of an exclusive right that is allegedly infringed.
+I swear, under penalty of perjury, that the information in this
+notification is accurate and that I am the copyright owner, or am
+authorized to act on behalf of the owner, of an exclusive right that is
+allegedly infringed.
 
 ## 6. Authorization and signature
+
+I have read and understand GitHub's Guide to Filing a DMCA Notice.
 
 [FILL IN: confirm the signer below is the owner or a duly authorized agent.]
 
@@ -113,8 +124,10 @@ on your service. Details:
 {_blockquote_finding(finding)}
 
 We request that you remove or disable access to the infringing material.
-This message is sent pursuant to Section 512(c) of the DMCA (17 U.S.C.
-§ 512(c)) or, for EU hosts, Article 17 BDSG/DSM Regulation as applicable.
+This message is sent pursuant to applicable law concerning the removal of
+infringing content — including, where relevant to your service, Section
+512(c) of the DMCA (17 U.S.C. § 512(c)) or your jurisdiction's equivalent
+notice-and-takedown procedure.
 
 Complainant: {v.name} ({v.email})
 Address: {v.address or "[FILL IN: postal address]"}

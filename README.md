@@ -32,16 +32,23 @@ Scan complete: 12 hit(s), 3 new, 3 DMCA kit(s) drafted. Dashboard: out/dashboard
    - **Web pages** you point it at (forum boards, index pages) — the
      torrent scene has no stable API, so you configure the pages your
      audience actually uses.
-3. **Findings store.** Every hit is deduped by URL in `findings.jsonl`;
-   re-found URLs update `last_seen`, new URLs become alerts.
+3. **Findings store.** Every hit is deduped by its `(product, source, URL)`
+   identity in `findings.jsonl`; re-found URLs update `last_seen`, new
+   URLs become alerts. A finding only ever records signatures that were
+   verifiably present in the matched repo/page — never just what the
+   search query asked for.
 4. **DMCA kits.** For every new finding, a kit is generated:
    - `README.md` — a human checklist: verify the hit *actually infringes*
      before doing anything (a matched string alone can be a bug report),
      archive evidence, then send.
-   - `github-dmca-notice.md` — a takedown notice containing **all seven
-     elements** GitHub's DMCA policy requires, pre-filled with your
-     vendor data and the infringing URLs. Fields the tool cannot know are
-     marked `[FILL IN]`.
+   - `github-dmca-notice.md` — a takedown notice containing **every
+     element** GitHub's DMCA policy and its filing guide require (work
+     identification, infringing URLs, contact info, good-faith statement
+     with the fair-use sentence, the remedy instruction, the accuracy-
+     under-perjury statement, authorization + signature, and the guide's
+     recommended acknowledgment), pre-filled with your vendor data and
+     the infringing URLs. Fields the tool cannot know are marked
+     `[FILL IN]`.
    - `host-abuse-email.txt` — the equivalent for non-GitHub hosts.
    - `evidence.json` — machine-readable detection record.
 5. **Dashboard.** A static, zero-JS `dashboard.html` showing where your
@@ -141,23 +148,33 @@ resource names, EULA checksums. Put one in a file, run
 
 ## Security posture
 
-- Every fetch runs with a hard timeout and response size cap; oversized
-  or hostile responses truncate instead of crashing the scan.
-- Fetched content is *data only*: dashboard output is HTML-escaped, links
-  are restricted to http(s), nothing fetched is ever executed.
-- Your GitHub token is read from the environment and sent only to
-  `api.github.com`; it is never logged or stored.
+- Every fetch runs with a per-request timeout, a **total fetch
+  deadline** (slow-drip responses truncate, they cannot stall a scan),
+  and a response size cap; oversized or hostile responses truncate
+  instead of crashing the scan.
+- Redirects are only followed to the **same host** over http(s) —
+  cross-host redirects, https→http downgrades, and other schemes are
+  refused outright.
+- Fetched content is *data only*: dashboard output is HTML-escaped in
+  both element and attribute context, links are restricted to http(s),
+  nothing fetched is ever executed.
+- Your GitHub token is read from the environment (never argv) and sent
+  only to `api.github.com` over https; the API client refuses any
+  non-https URL and redirects cannot carry it elsewhere. It is never
+  logged or stored.
 - `watch.json` (which contains your contact details) and `out/` are
   git-ignored by default.
 
 ## Development
 
 ```console
-$ python -m unittest discover -s tests -v    # 96 tests, no dependencies
+$ python -m unittest discover -s tests -v    # 123 tests, no dependencies
 ```
 
-The test suite stubs all transport — no network access is needed.
-`scan --dry-run` is safe to run anywhere for the same reason.
+The test suite stubs all transport except the redirect-policy and
+fetch-deadline tests, which use tiny local servers on 127.0.0.1 — no
+external network access is needed. `scan --dry-run` is safe to run
+anywhere for the same reason.
 
 ## Roadmap (S1/F3 candidates)
 

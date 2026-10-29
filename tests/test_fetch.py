@@ -1,8 +1,17 @@
-"""Tests for the fetcher and the GitHub client (all transport is stubbed)."""
+"""Tests for the fetcher and the GitHub client.
 
+Transport is stubbed except for the redirect-policy and deadline tests,
+which run tiny local HTTP servers on 127.0.0.1 (no external network).
+"""
+
+import threading
+import time
 import unittest
+import urllib.error
+import urllib.request
+from http.server import BaseHTTPRequestHandler, HTTPServer
 
-from piracy_watch.fetch import FetchError, Fetcher, GithubClient, RateLimited
+from piracy_watch.fetch import FetchError, Fetcher, GithubClient, RateLimited, _SafeRedirectHandler
 
 
 class FakeFetcher:
@@ -109,6 +118,208 @@ class TestFetcherGuards(unittest.TestCase):
         fetcher = Fetcher(max_bytes=200_000)
         body = fetcher._read_capped(Stream())
         self.assertLessEqual(len(body), 200_000 + 65536)
+
+
+def _free_port() -> int:
+    import socket
+
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
+def _serve(handler_class: type[BaseHTTPRequestHandler]) -> tuple[HTTPServer, int]:
+    server = HTTPServer(("127.0.0.1", _free_port()), handler_class)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server, server.server_address[1]
+
+
+class _Redirector(BaseHTTPRequestHandler):
+    """Redirects every request to the fixed host/port set by the test."""
+
+    target = ""  # e.g. "http://127.0.0.1:8472/final"
+
+    def do_GET(self):
+        self.send_response(302)
+        self.send_header("Location", self.target)
+        self.end_headers()
+
+    def log_message(self, *a):
+        pass
+
+
+class _Recorder(BaseHTTPRequestHandler):
+    """Records whether it was hit and with which Authorization header."""
+
+    hits: list[dict] = []
+
+    def do_GET(self):
+        _Recorder.hits.append({"path": self.path, "auth": self.headers.get("Authorization")})
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b'{"items": []}')
+
+    def log_message(self, *a):
+        pass
+
+
+class _SameHostRedirector(BaseHTTPRequestHandler):
+    """Redirects /redirected → /final on the same host (relative Location)."""
+
+    def do_GET(self):
+        if self.path == "/redirected":
+            self.send_response(302)
+            self.send_header("Location", "/final")
+            self.end_headers()
+        else:
+            _Recorder.hits.append({"path": self.path, "auth": self.headers.get("Authorization")})
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"final")
+
+    def log_message(self, *a):
+        pass
+
+
+class TestRedirectPolicy(unittest.TestCase):
+    """MOK-46 F2: the Authorization header must never cross hosts via redirect."""
+
+    def setUp(self):
+        _Recorder.hits = []
+        self.redirect_server, self.redirect_port = _serve(_Redirector)
+        self.target_server, self.target_port = _serve(_Recorder)
+
+    def tearDown(self):
+        self.redirect_server.shutdown()
+        self.target_server.shutdown()
+
+    def test_cross_host_redirect_is_refused_and_leaks_nothing(self):
+        _Redirector.target = f"http://127.0.0.1:{self.target_port}/final"
+        fetcher = Fetcher(timeout_s=5)
+        status, _ = fetcher.get(
+            f"http://127.0.0.1:{self.redirect_port}/search",
+            headers={"Authorization": "Bearer ghp_SUPERSECRET"},
+        )
+        # The redirect surfaces as a normal status; the target is never hit.
+        self.assertEqual(status, 302)
+        self.assertEqual(_Recorder.hits, [])
+
+    def test_same_host_redirect_is_followed(self):
+        server, port = _serve(_SameHostRedirector)
+        self.addCleanup(server.shutdown)
+        fetcher = Fetcher(timeout_s=5)
+        status, body = fetcher.get(
+            f"http://127.0.0.1:{port}/redirected",
+            headers={"Authorization": "Bearer ghp_LOCALONLY"},
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(body, b"final")
+        self.assertEqual(_Recorder.hits[0]["path"], "/final")
+        self.assertEqual(_Recorder.hits[0]["auth"], "Bearer ghp_LOCALONLY")  # same host is fine
+
+    def test_handler_refuses_cross_host(self):
+        handler = _SafeRedirectHandler()
+        req = urllib.request.Request("https://api.github.com/search")
+        with self.assertRaises(urllib.error.HTTPError) as ctx:
+            handler.redirect_request(
+                req, None, 302, "Found", {"Location": "https://evil.example/final"},
+                "https://evil.example/final",
+            )
+        self.assertIn("cross-host", str(ctx.exception))
+
+    def test_handler_refuses_https_to_http_downgrade(self):
+        handler = _SafeRedirectHandler()
+        req = urllib.request.Request("https://api.github.com/search")
+        with self.assertRaises(urllib.error.HTTPError) as ctx:
+            handler.redirect_request(
+                req, None, 302, "Found", {"Location": "http://api.github.com/search"},
+                "http://api.github.com/search",
+            )
+        self.assertIn("https→http", str(ctx.exception))
+
+    def test_handler_refuses_non_http_scheme(self):
+        handler = _SafeRedirectHandler()
+        req = urllib.request.Request("https://api.github.com/search")
+        with self.assertRaises(urllib.error.HTTPError) as ctx:
+            handler.redirect_request(
+                req, None, 302, "Found", {"Location": "ftp://api.github.com/search"},
+                "ftp://api.github.com/search",
+            )
+        self.assertIn("non-http(s)", str(ctx.exception))
+
+    def test_handler_follows_same_host_https(self):
+        handler = _SafeRedirectHandler()
+        req = urllib.request.Request("https://api.github.com/search")
+        request = handler.redirect_request(
+            req, None, 302, "Found", {"Location": "https://api.github.com/search/2"},
+            "https://api.github.com/search/2",
+        )
+        self.assertEqual(request.full_url, "https://api.github.com/search/2")
+
+
+class _Dripper(BaseHTTPRequestHandler):
+    """Sends a big Content-Length but trickles a few bytes, one per interval."""
+
+    drip_s = 0.4
+
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("Content-Length", "655360")
+        self.end_headers()
+        for _ in range(30):
+            try:
+                self.wfile.write(b"x")
+                self.wfile.flush()
+            except Exception:
+                return
+            time.sleep(self.drip_s)
+
+    def log_message(self, *a):
+        pass
+
+
+class TestTotalDeadline(unittest.TestCase):
+    """MOK-46 F3: a slow-drip body must not outlive the total deadline."""
+
+    def test_slow_drip_body_stops_at_deadline(self):
+        server, port = _serve(_Dripper)
+        self.addCleanup(server.shutdown)
+        fetcher = Fetcher(timeout_s=1)  # total deadline = 2s
+        start = time.monotonic()
+        _, body = fetcher.get(f"http://127.0.0.1:{port}/")
+        elapsed = time.monotonic() - start
+        self.assertLess(elapsed, 3.5)
+        # Body truncated well short of the advertised 655360 bytes.
+        self.assertLess(len(body), 20)
+
+    def test_read_capped_deadline_with_trickling_stream(self):
+        class Trickler:
+            def __init__(self):
+                self.chunks_sent = 0
+
+            def read1(self, n):
+                time.sleep(0.3)
+                self.chunks_sent += 1
+                return b"x" * 100
+
+        fetcher = Fetcher(max_bytes=1_000_000, total_timeout_s=1)
+        stream = Trickler()
+        body = fetcher._read_capped(stream)
+        self.assertLess(len(body), 500)  # deadline stopped the read early
+        self.assertLess(stream.chunks_sent, 10)
+
+    def test_total_timeout_defaults_to_double_socket_timeout(self):
+        self.assertEqual(Fetcher(timeout_s=1).total_timeout_s, 2)
+        self.assertEqual(Fetcher(timeout_s=15).total_timeout_s, 30)
+        self.assertEqual(Fetcher(timeout_s=15, total_timeout_s=5).total_timeout_s, 5)
+
+
+class TestApiSchemeGuard(unittest.TestCase):
+    def test_non_https_api_url_refused(self):
+        client = GithubClient(FakeFetcher([]), token="tok")
+        client.API = "http://api.github.com"
+        with self.assertRaises(FetchError):
+            client.search_code('"sig"')
 
 
 if __name__ == "__main__":

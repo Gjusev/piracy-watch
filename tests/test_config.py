@@ -102,6 +102,43 @@ class TestParseConfig(unittest.TestCase):
             with self.assertRaises(ValueError):
                 load_config(path)
 
+    def test_webhook_url_must_be_http(self):
+        raw = json.loads(EXAMPLE_CONFIG)
+        raw["alert"]["webhook_url"] = "ftp://hooks.example.net/x"
+        with self.assertRaises(ValueError):
+            parse_config(raw)
+
+    def test_https_webhook_accepted_without_warning(self):
+        import warnings as warnings_mod
+
+        raw = json.loads(EXAMPLE_CONFIG)
+        raw["alert"]["webhook_url"] = "https://hooks.example.net/x"
+        with warnings_mod.catch_warnings():
+            warnings_mod.simplefilter("error")  # any warning fails the test
+            config = parse_config(raw)
+        self.assertEqual(config.alerting.webhook_url, "https://hooks.example.net/x")
+
+    def test_http_webhook_warns(self):
+        import warnings as warnings_mod
+
+        raw = json.loads(EXAMPLE_CONFIG)
+        raw["alert"]["webhook_url"] = "http://hooks.example.net/x"
+        with warnings_mod.catch_warnings(record=True) as caught:
+            warnings_mod.simplefilter("always")
+            config = parse_config(raw)
+        self.assertTrue(any("unencrypted" in str(w.message) for w in caught))
+
+    def test_http_web_page_warns(self):
+        import warnings as warnings_mod
+
+        raw = json.loads(EXAMPLE_CONFIG)
+        raw["sources"]["web_pages"] = ["http://board.example.net/t/13"]
+        with warnings_mod.catch_warnings(record=True) as caught:
+            warnings_mod.simplefilter("always")
+            config = parse_config(raw)
+        self.assertEqual(config.sources.web_pages, ("http://board.example.net/t/13",))
+        self.assertTrue(any("prefer https" in str(w.message) for w in caught))
+
 
 if __name__ == "__main__":
     unittest.main()

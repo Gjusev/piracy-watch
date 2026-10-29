@@ -9,6 +9,7 @@ result is untrusted; the config is the only trusted input.
 from __future__ import annotations
 
 import json
+import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -152,6 +153,13 @@ def parse_config(raw: dict) -> Config:
     if not isinstance(pages_raw, list):
         raise ValueError("config: sources.web_pages must be a list of URLs")
     web_pages = tuple(_normalize_url(str(u).strip()) for u in pages_raw if str(u).strip())
+    for page in web_pages:
+        if page.casefold().startswith("http://"):
+            warnings.warn(
+                f"config: web page source {page!r} uses plain http; prefer https so the "
+                "matched text cannot be altered in transit",
+                stacklevel=2,
+            )
 
     limits_raw = raw.get("limits", {})
     if not isinstance(limits_raw, dict):
@@ -167,9 +175,17 @@ def parse_config(raw: dict) -> Config:
     if not isinstance(alert_raw, dict):
         raise ValueError("config: 'alert' must be an object")
     webhook = alert_raw.get("webhook_url")
+    webhook_url = str(webhook).strip() if webhook else None
+    if webhook_url and not webhook_url.casefold().startswith(("http://", "https://")):
+        raise ValueError(f"config: alert.webhook_url must be an http(s) URL, got {webhook_url!r}")
+    if webhook_url and webhook_url.casefold().startswith("http://"):
+        warnings.warn(
+            "config: alert.webhook_url uses plain http; the webhook payload will travel unencrypted",
+            stacklevel=2,
+        )
     alerting = Alerting(
         console=bool(alert_raw.get("console", True)),
-        webhook_url=str(webhook).strip() if webhook else None,
+        webhook_url=webhook_url,
     )
 
     return Config(vendor=vendor, products=tuple(products), sources=Sources(

@@ -49,6 +49,41 @@ class TestUntrustedContent(unittest.TestCase):
         html = render_html([make_finding()])
         self.assertIn('href="https://github.com/cracker/widgetpro-crack"', html)
 
+    # --- attribute-context payloads (MOK-46 F1): the href value itself is
+    # attacker-controlled and must be escaped at the sink, not just gated. ---
+
+    def test_url_with_quote_breakout_is_escaped(self):
+        url = 'https://evil.example/x"><script>alert(document.domain)</script>'
+        html = render_html([make_finding(url=url)])
+        self.assertNotIn("<script>alert(document.domain)</script>", html)
+        self.assertIn("&lt;script&gt;", html)
+        # The attribute never breaks out: no raw double quote from the payload.
+        self.assertNotIn('"><script', html)
+
+    def test_url_with_event_handler_is_escaped(self):
+        url = 'https://evil.example/x" onmouseover="fetch(\'https://att.example\')"'
+        html = render_html([make_finding(url=url)])
+        # The raw quote-delimited event handler never appears — the payload
+        # stays inside the quoted href attribute as inert escaped text.
+        self.assertNotIn('" onmouseover="', html)
+        self.assertIn("&quot;", html)
+
+    def test_url_with_control_chars_stays_inside_attribute(self):
+        url = "https://ok.example/a\r\nSet-Cookie: pwned=1"
+        html = render_html([make_finding(url=url)])
+        # Control chars cannot break out of the quoted attribute: the payload
+        # is followed by nothing but the closing quote and the rel attribute.
+        self.assertIn('\r\nSet-Cookie: pwned=1" rel="noreferrer noopener">', html)
+
+    def test_safe_href_is_scheme_gate_only(self):
+        # safe_href deliberately passes quote-bearing http(s) URLs through —
+        # escaping is the sink's job (see the tests above).
+        self.assertEqual(
+            safe_href('https://evil.example/x"><script>'),
+            'https://evil.example/x"><script>',
+        )
+        self.assertEqual(safe_href("https://ok.example/a"), "https://ok.example/a")
+
 
 class TestDashboardRendering(unittest.TestCase):
     def test_summary_counts_all_statuses(self):

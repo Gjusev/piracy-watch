@@ -2,8 +2,9 @@
 
 Single self-contained file, no JavaScript, no server. Every string that
 originates from outside the process (URLs, repo names, signatures, page
-titles) is HTML-escaped, and links are only emitted for http(s) URLs —
-search results are untrusted and must not be able to inject markup.
+titles) is HTML-escaped in both element and attribute context, and links
+are only emitted for http(s) URLs — search results are untrusted and
+must not be able to inject markup.
 """
 
 from __future__ import annotations
@@ -24,7 +25,13 @@ STATUS_STYLES = {
 
 
 def safe_href(url: str) -> str:
-    """Return the URL if it is a safe http(s) link, else '#'."""
+    """Scheme gate: return the URL if it is a safe http(s) link, else '#'.
+
+    This only filters the scheme — the *caller* must still escape the
+    returned string for its context (``_esc(..., quote=True)`` for href
+    attributes). A http(s) URL can still contain ``"``, ``<`` or ``>``,
+    which would break out of an unescaped attribute.
+    """
     lowered = (url or "").strip().casefold()
     if lowered.startswith("https://") or lowered.startswith("http://"):
         return url.strip()
@@ -62,7 +69,7 @@ def render_html(findings: list[Finding], generated_at: str | None = None) -> str
                 f"<td>{badge}</td>"
                 f'<td><span class="conf conf-{_esc(f.confidence)}">{_esc(f.confidence)}</span></td>'
                 f'<td>{_esc(f.source)}</td>'
-                f'<td><a href="{safe_href(f.url)}" rel="noreferrer noopener">{_esc(f.location)}</a>'
+                f'<td><a href="{_esc(safe_href(f.url))}" rel="noreferrer noopener">{_esc(f.location)}</a>'
                 f'<div class="sig">{_esc(", ".join(f.signatures[:4]))}</div></td>'
                 f"<td>{_esc(f.first_seen[:10])}</td>"
                 f"<td>{_esc(f.last_seen[:10])}</td>"

@@ -121,6 +121,7 @@ class GithubRepoSource:
     def _match_items(self, product: Product, term: str, items: list[dict]) -> list[Finding]:
         findings: list[Finding] = []
         name_sig = Signature(value=product.name, type="name", strength="low")
+        term_sig = Signature(value=term, type="name", strength="low")
         for item in items:
             if not isinstance(item, dict):
                 continue
@@ -133,9 +134,11 @@ class GithubRepoSource:
             if not in_repo_name and not contains_signature(description, name_sig):
                 continue  # GitHub returned a fuzzy hit; only keep real product mentions
             confidence = "high" if in_repo_name else "medium"
-            signatures = [f"{product.name} {term}"]
-            if contains_signature(description, name_sig):
-                signatures.append(product.name)
+            # Record only what this repo/page verifiably contains — the query
+            # was fuzzy, so "product + crack term" may never literally appear.
+            signatures = [product.name]
+            if contains_signature(full_name, term_sig) or contains_signature(description, term_sig):
+                signatures.append(term)
             findings.append(
                 Finding(
                     product=product.name,

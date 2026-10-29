@@ -27,9 +27,8 @@ def _resolve(config_arg: str | None) -> Path:
     return Path(config_arg or os.environ.get("PIRACY_WATCH_CONFIG") or WATCH_CONFIG)
 
 
-def _github_token(cli_value: str | None) -> str | None:
-    if cli_value:
-        return cli_value
+def _github_token() -> str | None:
+    """Token from the environment only — never argv (visible in `ps`)."""
     for name in ("PIRACY_WATCH_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN"):
         value = os.environ.get(name)
         if value:
@@ -60,23 +59,27 @@ def cmd_scan(args: argparse.Namespace) -> int:
     if args.dry_run:
         print("Dry run — the following queries would be executed:")
         shown = 0
-        for product in config.products:
-            for sig in product.signatures:
-                if sig.code_searchable:
-                    print(f"  code  search: \"{sig.value}\"  ({product.name})")
+        if config.sources.github_code:
+            for product in config.products:
+                for sig in product.signatures:
+                    if sig.code_searchable:
+                        print(f"  code  search: \"{sig.value}\"  ({product.name})")
+                        shown += 1
+        if config.sources.github_repos:
+            for product in config.products:
+                for term in config.sources.crack_terms:
+                    print(f"  repo  search: {product.name} {term}  ({product.name})")
                     shown += 1
-            for term in config.sources.crack_terms:
-                print(f"  repo  search: {product.name} {term}  ({product.name})")
+        # Pages are fetched once per scan, not once per product.
+        if config.sources.web_pages_enabled:
+            for url in config.sources.web_pages:
+                print(f"  page  fetch:  {url}")
                 shown += 1
-            if config.sources.web_pages_enabled:
-                for url in config.sources.web_pages:
-                    print(f"  page  fetch:  {url}  ({product.name})")
-                    shown += 1
         print(f"{shown} operations total. No network access was performed.")
         return 0
 
     store = Store(out_dir / FINDINGS_FILE)
-    sources = build_sources(config, github_token=_github_token(args.github_token))
+    sources = build_sources(config, github_token=_github_token())
     client = next(
         (s.client for s in sources if isinstance(s, (GithubCodeSource, GithubRepoSource))),
         None,
@@ -117,14 +120,24 @@ def cmd_scan(args: argparse.Namespace) -> int:
 
 
 def cmd_watch(args: argparse.Namespace) -> int:
-    """Loop scan on an interval; Ctrl-C exits cleanly (cron-friendly)."""
+    """Loop scan on an interval; Ctrl-C exits cleanly (cron-friendly).
+
+    A crashed scan (bad config, failed kit write, anything unexpected) is
+    reported and the loop keeps running — a daemon must survive its own
+    failures. Only Ctrl-C stops it.
+    """
     interval = args.interval
     print(f"Watching every {interval // 3600}h{(interval % 3600) // 60}m — Ctrl-C to stop")
     try:
         while True:
-            rc = cmd_scan(args)
-            if rc != 0:
-                print(f"scan exited with {rc}; continuing watch", file=sys.stderr)
+            try:
+                rc = cmd_scan(args)
+                if rc != 0:
+                    print(f"scan exited with {rc}; continuing watch", file=sys.stderr)
+            except KeyboardInterrupt:
+                raise
+            except Exception as exc:  # noqa: BLE001 — the watch loop outlives any single scan
+                print(f"scan crashed: {exc.__class__.__name__}: {exc}; continuing watch", file=sys.stderr)
             time.sleep(interval)
     except KeyboardInterrupt:
         print("\nWatch stopped.")
@@ -216,7 +229,6 @@ def build_parser() -> argparse.ArgumentParser:
     p_scan = sub.add_parser("scan", help="run all enabled sources once")
     p_scan.add_argument("--config", default=None, help="config path (default ./watch.json)")
     p_scan.add_argument("--out", default="out", help="output directory (default ./out)")
-    p_scan.add_argument("--github-token", default=None, help="GitHub token (else GITHUB_TOKEN env)")
     p_scan.add_argument("--dry-run", action="store_true", help="print queries, no network access")
     p_scan.add_argument("--fail-on-new", action="store_true", help="exit 1 when new findings appear")
     p_scan.set_defaults(func=cmd_scan)
@@ -224,7 +236,6 @@ def build_parser() -> argparse.ArgumentParser:
     p_watch = sub.add_parser("watch", help="scan on an interval (daemon)")
     p_watch.add_argument("--config", default=None)
     p_watch.add_argument("--out", default="out")
-    p_watch.add_argument("--github-token", default=None)
     p_watch.add_argument("--interval", type=int, default=DEFAULT_INTERVAL_S, help="seconds between scans")
     p_watch.set_defaults(func=cmd_watch)
 
