@@ -1,0 +1,11 @@
+# User-local watch configuration (contains your vendor contact details).
+watch.json
+# Findings database and generated output (dashboard, DMCA kits).
+findings.jsonl
+out/
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+# Tooling
+.pytest_cache/
